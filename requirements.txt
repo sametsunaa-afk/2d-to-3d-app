@@ -1,4 +1,5 @@
 streamlit
-requests
+numpy
+scipy
 trimesh
 pillow
