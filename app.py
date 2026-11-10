@@ -4,14 +4,13 @@ import os
 import io
 import base64
 import trimesh
+from PIL import Image
 from gradio_client import Client, handle_file
 import streamlit.components.v1 as components
 
-# Sayfa Ayarları
 st.set_page_config(page_title="2D to 3D STL Üretici", page_icon="🗿", layout="wide")
-
-st.title("🗿 Ücretsiz 2D'den 3D'ye STL Üretici (Stable Fast 3D)")
-st.info("🎉 Bu sistem en güncel açık kaynaklı Stability AI altyapısını kullanır. API Key veya ücret gerektirmez!")
+st.title("🗿 2D'den 3D'ye STL Üretici (Hatasız Sürüm)")
+st.info("💡 Fotoğrafınız sunucuyu çökertmemesi için otomatik optimize edilir.")
 
 col1, col2 = st.columns(2)
 
@@ -29,26 +28,27 @@ with col2:
     st.subheader("2. 3D Model ve STL İndirme")
     
     if generate_btn and uploaded_file is not None:
-        with st.spinner("Yapay zeka 3D modeli örüyor... (Yaklaşık 10-20 saniye sürer)"):
+        with st.spinner("Görsel optimize ediliyor ve 3D model örülüyor... (Lütfen bekleyin)"):
             try:
-                # Geçici dosya oluştur
-                suffix = os.path.splitext(uploaded_file.name)[1]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
+                # 1. Görseli GPU'yu çökertmeyecek boyuta getir (Maksimum 1024x1024)
+                img = Image.open(uploaded_file)
+                img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                    img.save(tmp.name, format="PNG")
+                    optimized_path = tmp.name
 
-                # En güncel Stability AI Stable-Fast-3D sunucusuna bağlan
+                # 2. Stability AI Stable Fast 3D'ye bağlan
                 client = Client("stabilityai/stable-fast-3d")
                 result = client.predict(
-                    input_image=handle_file(tmp_path),
-                    foreground_ratio=0.85,
+                    input_image=handle_file(optimized_path),
                     remesh_option="None",
                     vertex_count=-1,
                     texture_size=1024,
                     api_name="/run_button"
                 )
 
-                # Üretilen 3D dosyanın (GLB) yolunu al
+                # Sonuç dosyasını bul
                 if isinstance(result, (list, tuple)):
                     model_path = result[0]
                 elif isinstance(result, dict):
@@ -57,13 +57,12 @@ with col2:
                     model_path = str(result)
 
                 if model_path and os.path.exists(model_path):
-                    st.success("🎉 3D Modeliniz başarıyla oluşturuldu!")
+                    st.success("🎉 3D Modeliniz Başarıyla Oluşturuldu!")
 
-                    # Modeli oku
                     with open(model_path, "rb") as f:
                         glb_bytes = f.read()
 
-                    # 3D Canlı Görüntüleyici (Ekranda 360 derece döndürme)
+                    # 3D Görüntüleyici
                     glb_b64 = base64.b64encode(glb_bytes).decode("utf-8")
                     viewer_html = f"""
                     <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.3.0/model-viewer.min.js"></script>
@@ -75,7 +74,7 @@ with col2:
                     """
                     components.html(viewer_html, height=440)
 
-                    # 3D Yazıcı için STL'e dönüştür
+                    # STL'e dönüştür
                     scene_or_mesh = trimesh.load(model_path, file_type='glb')
                     if isinstance(scene_or_mesh, trimesh.Scene):
                         meshes = [g for g in scene_or_mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
@@ -87,27 +86,16 @@ with col2:
                     solid_mesh.export(stl_io, file_type='stl')
                     stl_bytes = stl_io.getvalue()
 
-                    # İndirme Butonları
-                    btn1, btn2 = st.columns(2)
-                    with btn1:
-                        st.download_button(
-                            label="📥 3D Yazıcı İçin STL İndir",
-                            data=stl_bytes,
-                            file_name="3d_baski_modeli.stl",
-                            mime="application/sla",
-                            type="primary",
-                            use_container_width=True
-                        )
-                    with btn2:
-                        st.download_button(
-                            label="🎨 Renkli GLB İndir",
-                            data=glb_bytes,
-                            file_name="model_renkli.glb",
-                            mime="model/gltf-binary",
-                            use_container_width=True
-                        )
+                    st.download_button(
+                        label="📥 3D Yazıcı İçin STL İndir",
+                        data=stl_bytes,
+                        file_name="3d_baski_modeli.stl",
+                        mime="application/sla",
+                        type="primary",
+                        use_container_width=True
+                    )
                 else:
                     st.error("Model dosyası oluşturulamadı.")
 
             except Exception as e:
-                st.error(f"İşlem sırasında bir hata oluştu: {str(e)}")
+                st.error(f"Hata detayı: {str(e)}")
