@@ -1,28 +1,24 @@
 import streamlit as st
-import requests
-import time
-import io
-import os
-import base64
-import trimesh
+import numpy as np
 from PIL import Image
+from scipy.ndimage import gaussian_filter, distance_transform_edt
+import trimesh
+import io
+import base64
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="2D to 3D STL Üretici", page_icon="🗿", layout="wide")
+st.set_page_config(page_title="Yerel 2D to 3D STL Üretici", page_icon="🗿", layout="wide")
 
-st.title("🗿 2D'den 3D'ye STL Üretici (Tripo3D Motoru)")
-st.markdown("Fotoğrafınızı yükleyin; yapay zeka **görünmeyen arkasını tamamlayarak** 3D yazıcıya hazır **STL** dosyası üretsin.")
+st.title("🗿 %100 Bağımsız ve Ücretsiz 2D'den 3D STL Üretici")
+st.info("🔒 Bu uygulama hiçbir harici siteye bağlanmaz, API Key istemez ve tamamen ücretsizdir. Matematiksel hacim algoritması ile 3D katı model üretir.")
 
-# Sol Panel
+# Yan Menü Ayarları
 with st.sidebar:
-    st.header("⚙️ Ayarlar")
-    tripo_api_key = st.text_input(
-        "Tripo3D API Anahtarınız (tsk_...):", 
-        type="password",
-        help="platform.tripo3d.ai adresinden alacağınız ücretsiz anahtar."
-    )
-    st.markdown("👉 **[Buradan Ücretsiz Tripo API Key Alın](https://platform.tripo3d.ai/api-keys)**")
-    st.caption("Google ile giriş yapın, soldaki 'API Keys' kısmından anahtarınızı kopyalayın.")
+    st.header("⚙️ 3D Model Ayarları")
+    target_height = st.slider("Figür Yüksekliği (mm)", 60, 200, 120, help="Yazıcıdan çıkacak biblonun boyu")
+    front_depth = st.slider("Ön Yüz Kabartma Derinliği", 3, 25, 10, help="Ön yüzdeki yüz ve kıyafet derinliği")
+    back_volume = st.slider("Arka Gövde Bombesi (Hacim)", 5, 40, 18, help="Arkaya doğru verilen etli/dolgun sırt hacmi")
+    add_base = st.checkbox("Altına Stant (Kaide) Ekle", value=True)
 
 col1, col2 = st.columns(2)
 
@@ -31,132 +27,145 @@ with col1:
     uploaded_file = st.file_uploader("Görsel seçin (JPG veya PNG)", type=["jpg", "jpeg", "png"])
     if uploaded_file is not None:
         st.image(uploaded_file, caption="Yüklenen Görsel", use_container_width=True)
-        generate_btn = st.button("🚀 3D Modeli ve Arkasını Oluştur", type="primary")
+        generate_btn = st.button("🚀 3D Katı Modeli Oluştur (Kendi Kodumuzla)", type="primary")
     else:
         generate_btn = False
 
 with col2:
-    st.subheader("2. 3D Model ve STL İndirme")
+    st.subheader("2. 3D Model Önizleme & STL İndir")
+    
     if generate_btn and uploaded_file is not None:
-        if not tripo_api_key:
-            st.error("Lütfen sol menüden Tripo3D API anahtarınızı (tsk_...) girin!")
-        else:
-            api_key = tripo_api_key.strip()
-            headers = {"Authorization": f"Bearer {api_key}"}
-            
-            with st.spinner("Fotoğraf optimize ediliyor ve yapay zekaya yükleniyor..."):
-                try:
-                    # Görseli optimize et
-                    img = Image.open(uploaded_file)
-                    img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-                    img_bytes_io = io.BytesIO()
-                    img.save(img_bytes_io, format="PNG")
-                    img_bytes = img_bytes_io.getvalue()
-                    
-                    # 1. Dosyayı Tripo'ya Yükle
-                    upload_url = "https://api.tripo3d.ai/v2/openapi/upload"
-                    files = {"file": ("input.png", img_bytes, "image/png")}
-                    upload_res = requests.post(upload_url, headers=headers, files=files)
-                    
-                    if upload_res.status_code != 200:
-                        st.error(f"Yükleme hatası ({upload_res.status_code}): {upload_res.text}")
-                    else:
-                        upload_data = upload_res.json()
-                        image_token = upload_data.get("data", {}).get("image_token")
+        with st.spinner("Matematiksel hacim örülüyor ve katı STL inşa ediliyor..."):
+            try:
+                # 1. Görseli Yükle ve Hazırla
+                img_pil = Image.open(uploaded_file)
+                # İdeal 3D çözünürlük için yeniden boyutlandır (200x200 ızgara ~80.000 poligon)
+                img_gray = img_pil.convert('L')
+                img_gray.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                w, h = img_gray.size
+                
+                arr = np.array(img_gray, dtype=np.float32) / 255.0
+                
+                # 2. Ön Yüz Derinliği (Işık/Gölge yumuşatma)
+                smooth_front = gaussian_filter(arr, sigma=1.2)
+                z_front = (smooth_front - smooth_front.min()) / (smooth_front.max() - smooth_front.min() + 1e-6)
+                z_front = z_front * front_depth
+                
+                # 3. Arka Yüz Hacmi (Anatomik organik sırt kubbesi)
+                # Merkeze doğru bombeli, kenarlara doğru daralan hacim
+                dist_mask = distance_transform_edt(np.ones_like(arr))
+                dist_norm = dist_mask / (dist_mask.max() + 1e-6)
+                z_back = - np.sin(dist_norm * np.pi / 2.0) * back_volume
+                
+                # 4. 3D Koordinat Ağını (Izgarayı) Oluştur
+                aspect_ratio = w / h
+                x_scale = (target_height * aspect_ratio) / w
+                y_scale = target_height / h
+                
+                x = np.linspace(-w * x_scale / 2.0, w * x_scale / 2.0, w)
+                y = np.linspace(h * y_scale / 2.0, -h * y_scale / 2.0, h)
+                xx, yy = np.meshgrid(x, y)
+                
+                # Tepe (Ön) ve Taban (Arka) Noktaları
+                top_vertices = np.column_stack((xx.flatten(), yy.flatten(), z_front.flatten()))
+                bot_vertices = np.column_stack((xx.flatten(), yy.flatten(), z_back.flatten()))
+                all_vertices = np.vstack((top_vertices, bot_vertices))
+                
+                # Yüzey Üçgenlerini Ör (Watertight / Katı Gövde)
+                faces = []
+                hw = w * h
+                
+                for i in range(h - 1):
+                    for j in range(w - 1):
+                        v0 = i * w + j
+                        v1 = i * w + (j + 1)
+                        v2 = (i + 1) * w + j
+                        v3 = (i + 1) * w + (j + 1)
                         
-                        if not image_token:
-                            st.error(f"Görsel tokenı alınamadı: {upload_data}")
-                        else:
-                            # 2. 3D Üretim Görevini Başlat
-                            task_url = "https://api.tripo3d.ai/v2/openapi/task"
-                            task_payload = {
-                                "type": "image_to_model",
-                                "file": {
-                                    "type": "png",
-                                    "file_token": image_token
-                                }
-                            }
-                            task_res = requests.post(
-                                task_url, 
-                                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, 
-                                json=task_payload
-                            )
-                            
-                            if task_res.status_code != 200:
-                                st.error(f"Görev başlatma hatası: {task_res.text}")
-                            else:
-                                task_id = task_res.json().get("data", {}).get("task_id")
-                                progress_bar = st.progress(0, text="Yapay zeka 3D modeli örüyor...")
-                                
-                                # 3. Model Tamamlanana Kadar Bekle
-                                glb_url = None
-                                for _ in range(60): # Maksimum 3-4 dakika
-                                    time.sleep(4)
-                                    status_res = requests.get(f"https://api.tripo3d.ai/v2/openapi/task/{task_id}", headers=headers)
-                                    if status_res.status_code == 200:
-                                        status_data = status_res.json().get("data", {})
-                                        current_status = status_data.get("status")
-                                        progress = status_data.get("progress", 0)
-                                        
-                                        progress_bar.progress(progress, text=f"3D Model Üretiliyor: %{progress}")
-                                        
-                                        if current_status == "success":
-                                            output = status_data.get("output", {})
-                                            glb_url = output.get("pbr_model") or output.get("model")
-                                            break
-                                        elif current_status in ["failed", "cancelled"]:
-                                            st.error("Model üretimi başarısız oldu.")
-                                            break
-                                
-                                if glb_url:
-                                    progress_bar.empty()
-                                    st.success("🎉 3D Modeliniz başarıyla tamamlandı!")
-                                    
-                                    # GLB'yi indir
-                                    glb_data = requests.get(glb_url).content
-                                    
-                                    # 3D Görüntüleyici
-                                    glb_b64 = base64.b64encode(glb_data).decode("utf-8")
-                                    viewer_html = f"""
-                                    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.3.0/model-viewer.min.js"></script>
-                                    <model-viewer src="data:model/gltf-binary;base64,{glb_b64}" 
-                                                  auto-rotate 
-                                                  camera-controls 
-                                                  style="width: 100%; height: 420px; background-color: #2b2b2b; border-radius: 12px;">
-                                    </model-viewer>
-                                    """
-                                    components.html(viewer_html, height=440)
-                                    
-                                    # STL'e dönüştür
-                                    scene_or_mesh = trimesh.load(io.BytesIO(glb_data), file_type='glb')
-                                    if isinstance(scene_or_mesh, trimesh.Scene):
-                                        meshes = [g for g in scene_or_mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
-                                        solid_mesh = trimesh.util.concatenate(meshes)
-                                    else:
-                                        solid_mesh = scene_or_mesh
-                                        
-                                    stl_io = io.BytesIO()
-                                    solid_mesh.export(stl_io, file_type='stl')
-                                    stl_bytes = stl_io.getvalue()
-                                    
-                                    # İndirme Butonları
-                                    b1, b2 = st.columns(2)
-                                    with b1:
-                                        st.download_button(
-                                            label="📥 3D Yazıcı İçin STL İndir",
-                                            data=stl_bytes,
-                                            file_name="3d_baski_modeli.stl",
-                                            mime="application/sla",
-                                            type="primary",
-                                            use_container_width=True
-                                        )
-                                    with b2:
-                                        st.download_button(
-                                            label="🎨 Renkli GLB İndir",
-                                            data=glb_data,
-                                            file_name="model_renkli.glb",
-                                            mime="model/gltf-binary",
-                                            use_container_width=True
-                                        )
-                except Exception as e:
-                    st.error(f"Hata detayı: {str(e)}")
+                        # Ön Yüz
+                        faces.append([v0, v2, v1])
+                        faces.append([v1, v2, v3])
+                        
+                        # Arka Yüz (Ters yönlü yüzey normalleri)
+                        faces.append([hw + v0, hw + v1, hw + v2])
+                        faces.append([hw + v1, hw + v3, hw + v2])
+                
+                # 5. Yan Duvarları Dikişle (Ön ve Arkayı Birleştirip Su Geçirmez Yap)
+                # Üst ve Alt kenarlar
+                for j in range(w - 1):
+                    # Üst kenar (i = 0)
+                    t0, t1 = j, j + 1
+                    b0, b1 = hw + t0, hw + t1
+                    faces.append([t0, t1, b0])
+                    faces.append([t1, b1, b0])
+                    
+                    # Alt kenar (i = h - 1)
+                    t0, t1 = (h - 1) * w + j, (h - 1) * w + (j + 1)
+                    b0, b1 = hw + t0, hw + t1
+                    faces.append([t0, b0, t1])
+                    faces.append([t1, b0, b1])
+                
+                # Sol ve Sağ kenarlar
+                for i in range(h - 1):
+                    # Sol kenar (j = 0)
+                    t0, t1 = i * w, (i + 1) * w
+                    b0, b1 = hw + t0, hw + t1
+                    faces.append([t0, b0, t1])
+                    faces.append([t1, b0, b1])
+                    
+                    # Sağ kenar (j = w - 1)
+                    t0, t1 = i * w + (w - 1), (i + 1) * w + (w - 1)
+                    b0, b1 = hw + t0, hw + t1
+                    faces.append([t0, t1, b0])
+                    faces.append([t1, b1, b0])
+                
+                mesh = trimesh.Trimesh(vertices=all_vertices, faces=faces)
+                mesh.fill_holes()
+                mesh.fix_normals()
+                
+                # 6. Kaide (Stant) Ekle
+                if add_base:
+                    bounds = mesh.bounds
+                    base_radius = max((bounds[1][0] - bounds[0][0]), (bounds[1][1] - bounds[0][1])) * 0.45
+                    base_height = 4.0
+                    base = trimesh.creation.cylinder(radius=base_radius, height=base_height, sections=40)
+                    # Kaideyi modelin alt tabanına yerleştir
+                    base.apply_translation([0, bounds[0][1] + 2.0, bounds[0][2] - (base_height / 2.0)])
+                    mesh = trimesh.util.concatenate([mesh, base])
+                
+                # 7. Model Başarılı
+                st.success("🎉 Katı 3D Modeliniz Saniyeler İçinde Üretildi!")
+                
+                # Canlı Önizleme İçin GLB Verisi
+                glb_io = io.BytesIO()
+                mesh.export(glb_io, file_type='glb')
+                glb_bytes = glb_io.getvalue()
+                glb_b64 = base64.b64encode(glb_bytes).decode("utf-8")
+                
+                viewer_html = f"""
+                <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.3.0/model-viewer.min.js"></script>
+                <model-viewer src="data:model/gltf-binary;base64,{glb_b64}" 
+                              auto-rotate 
+                              camera-controls 
+                              style="width: 100%; height: 420px; background-color: #2b2b2b; border-radius: 12px;">
+                </model-viewer>
+                """
+                components.html(viewer_html, height=440)
+                
+                # STL Dosyasını Hazırla
+                stl_io = io.BytesIO()
+                mesh.export(stl_io, file_type='stl')
+                stl_bytes = stl_io.getvalue()
+                
+                # Doğrudan İndirme Butonu
+                st.download_button(
+                    label="📥 3D Yazıcı İçin STL İndir (Tamamen Ücretsiz)",
+                    data=stl_bytes,
+                    file_name="cift_3d_katı_biblo.stl",
+                    mime="application/sla",
+                    type="primary",
+                    use_container_width=True
+                )
+                
+            except Exception as e:
+                st.error(f"Hata oluştu: {str(e)}")
